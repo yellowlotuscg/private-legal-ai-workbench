@@ -4,45 +4,118 @@ A local-first proof of concept for source-grounded legal knowledge work: retriev
 
 > This is research assistance infrastructure, not legal advice. It uses synthetic sample matter text.
 
+The code searches passages you pass in memory. It keeps each hit tied to a source and a matter, and it returns an empty list when nothing matches. Matching is token overlap. There is no language model and no network call.
+
 ## Philosophy
 
 A private legal AI system should answer from the record, show where an answer came from, respect matter boundaries, and say when the record is insufficient. Retrieval is not authority. Human review remains required.
 
-## Run
+## Setup
+
+The modules use the Python standard library only (`dataclasses`, `re`, and `unittest`). There is no dependency file and nothing to install with pip. GitHub Actions runs the tests on Python 3.12.
+
+Clone with HTTPS and run commands from the repository root so Python can import `legal_ai`:
 
 ```bash
-python -m legal_ai.demo
-python -m unittest discover -s tests -v
+git clone https://github.com/yellowlotuscg/private-legal-ai-workbench.git
+cd private-legal-ai-workbench
 ```
 
-Implemented here: deterministic local retrieval, source citations, matter labels, and an explicit no-answer state. Production work would add authenticated storage, encryption, retention controls, privilege handling, evaluation datasets, and formal deployment review.
+On a machine where the interpreter is `python3` rather than `python`, use `python3` in the commands below. The workflow calls `python` after `actions/setup-python` installs it.
 
-Relevant practices include NIST AI RMF, NIST Privacy Framework, OWASP LLM guidance, least privilege, data classification, retention controls, confidentiality, privilege awareness, and citation traceability.
+## Usage
 
-## Implemented
+### Demo
 
-The repository contains working code, not mockups:
+`legal_ai/demo.py` builds two synthetic passages and searches `matter-a` for `renewal notice`:
 
-- Deterministic local retrieval (`legal_ai/retrieval.py`): a query is split into lowercase alphanumeric terms and matched against passage text without any external service.
-- Source citations: every returned passage keeps its `source` label (for example `contract.md`), so an answer points back to the passage it came from.
-- Matter labels: every passage belongs to one `matter`, and retrieval only ever considers passages from the requested matter, so one matter cannot leak into another.
-- Ranking by term overlap: passages sharing more query terms rank first, and only passages sharing at least one term are returned.
-- An explicit no-answer state: when nothing matches, retrieval returns an empty list rather than a guess.
-- A runnable demo (`python -m legal_ai.demo`) that retrieves from a synthetic two-matter corpus and prints whether an answer is supported plus the citation sources.
+| Matter | Source | Text |
+| --- | --- | --- |
+| `matter-a` | `contract.md` | The agreement renews annually unless notice is given thirty days before renewal. |
+| `matter-b` | `memo.md` | The payment dispute was referred to mediation. |
 
-## Limitations
+```bash
+python3 -m legal_ai.demo
+```
 
-- The corpus is in-memory and synthetic. There is no document store, ingestion pipeline, or real matter data.
-- Matching is keyword overlap on lowercased tokens. There is no semantic search, no embeddings, and no large language model in this proof of concept.
-- Retrieval is not authority and the demo output is not legal advice. A human reviewer must read the cited passages before any use.
-- There is no storage, encryption, retention control, privilege handling, or authentication in this code; those are listed as production work in the README.
-- The suite covers the retrieval core only (matter boundary and no-answer behavior), not a full review workflow.
+That prints:
+
+```text
+{'answer_supported': True, 'citations': ['contract.md'], 'matter_boundary': 'matter-a'}
+```
+
+`answer_supported` is true when `retrieve` returned at least one passage. `citations` is the `source` of each hit. `matter_boundary` is the matter that was searched. The memo is on `matter-b`, so it is not included.
+
+### Calling retrieval
+
+`legal_ai/__init__.py` is empty. Import from `legal_ai.retrieval`.
+
+```python
+from legal_ai.retrieval import Passage, retrieve
+
+passages = [
+    Passage(
+        "matter-a",
+        "contract.md",
+        "The agreement renews annually unless notice is given thirty days before renewal.",
+    ),
+    Passage(
+        "matter-b",
+        "memo.md",
+        "The payment dispute was referred to mediation.",
+    ),
+]
+
+hits = retrieve("renewal notice", passages, "matter-a")
+```
+
+`Passage` is a frozen dataclass with three fields: `matter`, `source`, and `text`.
+
+`retrieve(query, passages, matter, limit=3)` works like this:
+
+1. It splits `query` into lowercase tokens with the regular expression `[a-z0-9]+`. Punctuation is not part of a token, so `thirty-days` becomes the tokens `thirty` and `days`.
+2. It keeps passages whose `matter` is exactly equal to the `matter` argument. The comparison is case-sensitive.
+3. It scores each remaining passage by how many query tokens also appear in that passage's text, using the same tokenizer.
+4. It sorts higher scores first. Passages with the same score stay in their original order.
+5. It drops passages with a score of zero, then returns at most `limit` passages. The default limit is 3.
+
+An empty query, an unknown matter, or a query that shares no tokens with the allowed passages returns `[]`. The function does not fill that gap with another passage.
+
+Read `source` and `text` on each returned `Passage` before treating it as support for an answer.
 
 ## Tests
 
-The standard-library `unittest` suite lives in `tests/test_retrieval.py` and verifies that:
+`tests/test_retrieval.py` checks two behaviors:
 
-- retrieval respects the matter boundary: with two matters containing the same text, a query for one matter returns only that matter's passage;
-- an unrelated query returns an empty list (the no-answer state).
+- `test_matter_boundary`: the same text is stored on matters `a` and `b`. A query for `notice` limited to matter `a` returns only `a.md`.
+- `test_no_answer`: a query that shares no tokens with the passage returns `[]`.
 
-Run it locally with `python -m unittest discover -s tests -v`. GitHub Actions runs the same command on every push to `main` and every pull request into `main` (see `.github/workflows/tests.yml`), with read-only token permissions and no credentials stored in the workflow.
+From the repository root:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+`.github/workflows/tests.yml` runs `python -m unittest discover -s tests -v` on every push to `main` and every pull request into `main`. The job checks out the repository, sets up Python 3.12, and sets `permissions.contents` to `read`.
+
+## Layout
+
+```text
+legal_ai/retrieval.py         Passage and retrieve
+legal_ai/demo.py              sample two-matter run
+legal_ai/__init__.py          empty package marker
+tests/test_retrieval.py       matter boundary and empty-result tests
+.github/workflows/tests.yml   unittest on Python 3.12
+```
+
+## Limits
+
+Implemented here: deterministic local retrieval, source citations, matter labels, and an explicit no-answer state.
+
+The corpus is the list passed to `retrieve`. Nothing in this repository stores documents, encrypts them, authenticates a user, or applies a retention policy. Production work would add authenticated storage, encryption, retention controls, privilege handling, evaluation datasets, and formal deployment review.
+
+Ranking is a count of shared lowercase alphanumeric tokens. The code does not stem words, expand synonyms, or compare embeddings. A returned passage is a pointer to text you supplied. It is not a legal conclusion. The tests cover matter filtering and the empty result, not a review workflow.
+
+## License
+
+MIT. Copyright (c) 2026 Matthew Coggins. See [LICENSE](LICENSE).
